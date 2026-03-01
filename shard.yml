@@ -1,0 +1,24 @@
+name: visual_compiler
+version: 0.1.0
+
+authors:
+  - kojix2 <2xijok@gmail.com>
+
+targets:
+  visual_compiler:
+    main: src/cli.cr
+
+dependencies:
+  kemal:
+    github: kemalcr/kemal
+  nano:
+    github: ysbaddaden/nanolib.cr
+    branch: main
+  markd:
+    github: icyleaf/markd
+  reply:
+    github: I3oris/reply
+
+crystal: '>= 1.19.1'
+
+license: MIT
