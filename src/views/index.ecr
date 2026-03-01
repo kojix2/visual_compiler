@@ -278,7 +278,7 @@
             <option value="prelude">prelude</option>
             <option value="empty">empty</option>
           </select>
-          <span class="status">canonical parse → codegen (nano default)</span>
+          <span class="status">canonical parse → semantic summary → codegen</span>
         </div>
         <div id="progress" class="progress" aria-live="polite">
           <span class="spinner" aria-hidden="true"></span>
@@ -294,20 +294,24 @@
 
     <section class="pane">
       <div class="pane-header">
-        <span>AST Snapshots</span>
+        <span>Stage Snapshots</span>
         <span id="stageSummary" class="status">-</span>
       </div>
       <div class="pane-content">
         <div id="tabs" class="tabs"></div>
+        <div class="section-title">Stage Diff</div>
+        <pre id="diff" class="mono"></pre>
         <div id="meta" class="meta"></div>
+        <div class="section-title">Semantic Summary</div>
+        <pre id="semanticSummary" class="mono"></pre>
         <div class="section-title">Program Metadata</div>
         <pre id="programMeta" class="mono"></pre>
+        <div class="section-title">Compile Log</div>
+        <pre id="compileLog" class="mono"></pre>
         <div class="section-title">AST Tree</div>
         <pre id="tree" class="mono"></pre>
         <div class="section-title">AST Text</div>
         <pre class="mono"><code id="astText" class="language-crystal"></code></pre>
-        <div class="section-title">Diff from previous stage</div>
-        <pre id="diff" class="mono"></pre>
       </div>
     </section>
 
@@ -335,7 +339,9 @@
     const treeEl = document.getElementById("tree");
     const astTextEl = document.getElementById("astText");
     const diffEl = document.getElementById("diff");
+    const semanticSummaryEl = document.getElementById("semanticSummary");
     const programMetaEl = document.getElementById("programMeta");
+    const compileLogEl = document.getElementById("compileLog");
     const llvmEditorHost = document.getElementById("llvmEditor");
     const stageSummaryEl = document.getElementById("stageSummary");
     const llvmMetaEl = document.getElementById("llvmMeta");
@@ -345,6 +351,8 @@
 
     let snapshots = [];
     let programMetadata = null;
+    let semanticSummary = null;
+    let compileLog = "";
     let activeIndex = 0;
     let progressTimer = null;
     const sourceEditor = CodeMirror(sourceEditorHost, {
@@ -459,8 +467,22 @@
 
     function phaseByElapsed(seconds) {
       if (seconds < 3.0) return "Canonical Parse";
-      if (seconds < 10.0) return "Analyze Program metadata";
+      if (seconds < 10.0) return "Semantic Summary";
       return "Generate LLVM IR";
+    }
+
+    function renderSummaryBlock(summary) {
+      if (!summary) return "(semantic summary unavailable)";
+      return Object.entries(summary)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join("\n");
+    }
+
+    function renderCompileLog(text) {
+      if (!text || text.trim() === "") return "(no compile log)";
+      const lines = text.split("\n");
+      const tail = lines.slice(Math.max(lines.length - 40, 0));
+      return tail.join("\n");
     }
 
     function startProgress() {
@@ -505,7 +527,9 @@
         treeEl.textContent = "";
         renderHighlighted(astTextEl, "", "crystal");
         diffEl.textContent = "";
+        semanticSummaryEl.textContent = "";
         programMetaEl.textContent = "";
+        compileLogEl.textContent = "";
         stageSummaryEl.textContent = "-";
         return;
       }
@@ -545,6 +569,8 @@
 
       const summary = extra.summary ? ` / ${extra.summary}` : "";
       stageSummaryEl.textContent = `${snapshot.label}${summary}`;
+      semanticSummaryEl.textContent = renderSummaryBlock(semanticSummary);
+      compileLogEl.textContent = renderCompileLog(compileLog);
 
       if (!programMetadata) {
         programMetaEl.textContent = "(compiler metadata unavailable)";
@@ -595,6 +621,8 @@
 
         snapshots = data.snapshots || [];
         programMetadata = data.program_metadata || null;
+        semanticSummary = data.semantic_summary || null;
+        compileLog = data.compile_log || "";
         activeIndex = 0;
         renderTabs();
         renderSnapshot();
@@ -609,6 +637,8 @@
       } catch (error) {
         snapshots = [];
         programMetadata = null;
+        semanticSummary = null;
+        compileLog = "";
         renderTabs();
         renderSnapshot();
         llvmEditor.setValue("");

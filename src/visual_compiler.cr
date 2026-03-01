@@ -53,20 +53,20 @@ module VisualCompiler
       prelude = read_prelude(env)
       env.response.content_type = "application/json"
       if env.response.status_code == 413
-        next error_response(RequestTooLarge.new("payload too large"), "", [] of Snapshot, "", nil, prelude)
+        next error_response(RequestTooLarge.new("payload too large"), "", [] of Snapshot, "", nil, nil, prelude)
       end
 
       begin
         with_timeout(REQUEST_TIMEOUT_SECONDS) do
-          snapshots, llvm_ir, compile_log, program_metadata = trace(source, prelude)
-          build_trace_response(source, snapshots, llvm_ir, compile_log, program_metadata, prelude)
+          snapshots, llvm_ir, compile_log, program_metadata, semantic_summary = trace(source, prelude)
+          build_trace_response(source, snapshots, llvm_ir, compile_log, program_metadata, semantic_summary, prelude)
         end
       rescue ex : RequestTimeout
         env.response.status_code = 408
-        error_response(ex, source, [] of Snapshot, "", nil, prelude)
+        error_response(ex, source, [] of Snapshot, "", nil, nil, prelude)
       rescue ex
         env.response.status_code = 400
-        error_response(ex, source, [] of Snapshot, "", nil, prelude)
+        error_response(ex, source, [] of Snapshot, "", nil, nil, prelude)
       end
     end
 
@@ -97,6 +97,25 @@ module VisualCompiler
       diff_lines: [] of String
     )
 
+    semantic_started = Time.instant
+    program_metadata = extract_program_metadata(source, prelude)
+    semantic_elapsed = elapsed_ms(semantic_started)
+    semantic_counts = metadata_counts(program_metadata)
+    snapshots << Snapshot.new(
+      id: "semantic",
+      label: "Semantic Summary",
+      elapsed_ms: semantic_elapsed,
+      node_count: canonical_count,
+      ast_text: canonical_text,
+      tree_lines: canonical_lines,
+      metadata: {
+        "stage" => "Semantic",
+        "summary" => "Programと型情報の蓄積結果サマリ",
+        "prelude" => prelude,
+      },
+      diff_lines: diff_count_lines({} of String => Int64, semantic_counts)
+    )
+
     llvm_started = Time.instant
     llvm_ir, compile_log = compile_llvm_ir(source, prelude)
     llvm_elapsed = elapsed_ms(llvm_started)
@@ -113,12 +132,51 @@ module VisualCompiler
         "llvm_lines" => llvm_ir.lines.size.to_s,
         "prelude" => prelude,
       },
-      diff_lines: [] of String
+      diff_lines: diff_count_lines(semantic_counts, semantic_counts)
     )
 
-    program_metadata = extract_program_metadata(source, prelude)
+    semantic_summary = build_semantic_summary(program_metadata)
 
-    {snapshots, llvm_ir, compile_log, program_metadata}
+    {snapshots, llvm_ir, compile_log, program_metadata, semantic_summary}
+  end
+
+  def metadata_counts(program_metadata : Hash(String, JSON::Any)?)
+    result = {} of String => Int64
+    return result unless program_metadata
+
+    program_metadata.each do |key, value|
+      next unless key.ends_with?("_count")
+      int_value = value.as_i64?
+      next unless int_value
+      result[key] = int_value
+    end
+    result
+  end
+
+  def diff_count_lines(before : Hash(String, Int64), after : Hash(String, Int64))
+    keys = (before.keys + after.keys).uniq.sort
+    diff = [] of String
+    keys.each do |key|
+      old_value = before[key]? || 0_i64
+      new_value = after[key]? || 0_i64
+      delta = new_value - old_value
+      next if delta == 0
+      sign = delta > 0 ? "+" : "-"
+      diff << "#{sign} #{key}: #{old_value} -> #{new_value} (#{delta >= 0 ? "+" : ""}#{delta})"
+    end
+    diff
+  end
+
+  def build_semantic_summary(program_metadata : Hash(String, JSON::Any)?) : Hash(String, JSON::Any)?
+    return nil unless program_metadata
+
+    summary = {} of String => JSON::Any
+    %w(types_count symbols_count unions_count vars_count const_initializers_count class_var_initializers_count file_modules_count requires_count prelude).each do |key|
+      value = program_metadata[key]?
+      summary[key] = value if value
+    end
+    summary["focus"] = JSON::Any.new("MetaVars and Program accumulation")
+    summary
   end
 
   def extract_program_metadata(source : String, prelude : String) : Hash(String, JSON::Any)?
@@ -235,7 +293,7 @@ module VisualCompiler
     end
   end
 
-  def build_trace_response(source : String, snapshots : Array(Snapshot), llvm_ir : String, compile_log : String, program_metadata : Hash(String, JSON::Any)?, prelude : String)
+  def build_trace_response(source : String, snapshots : Array(Snapshot), llvm_ir : String, compile_log : String, program_metadata : Hash(String, JSON::Any)?, semantic_summary : Hash(String, JSON::Any)?, prelude : String)
     JSON.build do |json|
       json.object do
         json.field "source", source
@@ -279,6 +337,13 @@ module VisualCompiler
             json.null
           end
         end
+        json.field "semantic_summary" do
+          if semantic_summary
+            JSON::Any.new(semantic_summary).to_json(json)
+          else
+            json.null
+          end
+        end
       end
     end
   end
@@ -313,7 +378,7 @@ module VisualCompiler
     prelude
   end
 
-  def error_response(ex : Exception, source : String, snapshots : Array(Snapshot), llvm_ir : String, program_metadata : Hash(String, JSON::Any)?, prelude : String)
+  def error_response(ex : Exception, source : String, snapshots : Array(Snapshot), llvm_ir : String, program_metadata : Hash(String, JSON::Any)?, semantic_summary : Hash(String, JSON::Any)?, prelude : String)
     message = ex.message || ex.class.name
     JSON.build do |json|
       json.object do
@@ -333,6 +398,13 @@ module VisualCompiler
         json.field "program_metadata" do
           if program_metadata
             JSON::Any.new(program_metadata).to_json(json)
+          else
+            json.null
+          end
+        end
+        json.field "semantic_summary" do
+          if semantic_summary
+            JSON::Any.new(semantic_summary).to_json(json)
           else
             json.null
           end
