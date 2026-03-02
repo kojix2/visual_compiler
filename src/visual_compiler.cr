@@ -8,7 +8,7 @@ module VisualCompiler
   VERSION                 = "0.1.0"
   MAX_INPUT_BYTES         = 1_000_000
   REQUEST_TIMEOUT_SECONDS =       120
-  DEFAULT_TRACE_PRELUDE   =      "nano"
+  DEFAULT_TRACE_PRELUDE   = "nano"
 
   record Snapshot,
     id : String,
@@ -51,6 +51,7 @@ module VisualCompiler
     post "/api/trace" do |env|
       source = read_source(env)
       prelude = read_prelude(env)
+      no_debug = read_no_debug(env)
       env.response.content_type = "application/json"
       if env.response.status_code == 413
         next error_response(RequestTooLarge.new("payload too large"), "", [] of Snapshot, "", nil, nil, prelude)
@@ -58,7 +59,7 @@ module VisualCompiler
 
       begin
         with_timeout(REQUEST_TIMEOUT_SECONDS) do
-          snapshots, llvm_ir, compile_log, program_metadata, semantic_summary = trace(source, prelude)
+          snapshots, llvm_ir, compile_log, program_metadata, semantic_summary = trace(source, prelude, no_debug)
           build_trace_response(source, snapshots, llvm_ir, compile_log, program_metadata, semantic_summary, prelude)
         end
       rescue ex : RequestTimeout
@@ -73,7 +74,7 @@ module VisualCompiler
     Kemal.run
   end
 
-  def trace(source : String, prelude : String)
+  def trace(source : String, prelude : String, no_debug : Bool = false)
     snapshots = [] of Snapshot
 
     canonical_started = Time.instant
@@ -91,14 +92,14 @@ module VisualCompiler
       ast_text: canonical_text,
       tree_lines: canonical_lines,
       metadata: {
-        "stage" => "Parser",
+        "stage"   => "Parser",
         "summary" => "入力を正規化した構文木",
       },
       diff_lines: [] of String
     )
 
     semantic_started = Time.instant
-    program_metadata = extract_program_metadata(source, prelude)
+    program_metadata = extract_program_metadata(source, prelude, no_debug)
     semantic_elapsed = elapsed_ms(semantic_started)
     semantic_counts = metadata_counts(program_metadata)
     snapshots << Snapshot.new(
@@ -109,7 +110,7 @@ module VisualCompiler
       ast_text: canonical_text,
       tree_lines: canonical_lines,
       metadata: {
-        "stage" => "Semantic",
+        "stage"   => "Semantic",
         "summary" => "Programと型情報の蓄積結果サマリ",
         "prelude" => prelude,
       },
@@ -117,7 +118,7 @@ module VisualCompiler
     )
 
     llvm_started = Time.instant
-    llvm_ir, compile_log = compile_llvm_ir(source, prelude)
+    llvm_ir, compile_log = compile_llvm_ir(source, prelude, no_debug)
     llvm_elapsed = elapsed_ms(llvm_started)
     snapshots << Snapshot.new(
       id: "codegen",
@@ -127,10 +128,10 @@ module VisualCompiler
       ast_text: canonical_text,
       tree_lines: canonical_lines,
       metadata: {
-        "stage" => "Codegen",
-        "summary" => "crystal build --emit llvm-ir の結果",
+        "stage"      => "Codegen",
+        "summary"    => "crystal build --emit llvm-ir の結果",
         "llvm_lines" => llvm_ir.lines.size.to_s,
-        "prelude" => prelude,
+        "prelude"    => prelude,
       },
       diff_lines: diff_count_lines(semantic_counts, semantic_counts)
     )
@@ -179,7 +180,7 @@ module VisualCompiler
     summary
   end
 
-  def extract_program_metadata(source : String, prelude : String) : Hash(String, JSON::Any)?
+  def extract_program_metadata(source : String, prelude : String, no_debug : Bool = false) : Hash(String, JSON::Any)?
     crystal_path = ENV["CRYSTAL_PATH"]? || default_crystal_path
     source_b64 = Base64.strict_encode(source)
 
@@ -191,6 +192,9 @@ module VisualCompiler
       source = Base64.decode_string(ENV.fetch("VC_SOURCE_B64"))
       compiler = Crystal::Compiler.new
       compiler.prelude = ENV["VC_TRACE_PRELUDE"]? || "prelude"
+      if ENV["VC_NO_DEBUG"]? == "1"
+        compiler.debug = Crystal::Debug::None
+      end
       source_file = Crystal::Compiler::Source.new("input.cr", source)
       result = compiler.top_level_semantic(source_file)
       program = result.program
@@ -216,14 +220,17 @@ module VisualCompiler
     stdout = IO::Memory.new
     stderr = IO::Memory.new
 
+    env = {
+      "CRYSTAL_PATH"     => crystal_path,
+      "VC_SOURCE_B64"    => source_b64,
+      "VC_TRACE_PRELUDE" => prelude,
+    }
+    env["VC_NO_DEBUG"] = "1" if no_debug
+
     status = Process.run(
       "crystal",
       ["eval", "-Di_know_what_im_doing", "-Dwithout_libxml2", script],
-      env: {
-        "CRYSTAL_PATH"   => crystal_path,
-        "VC_SOURCE_B64"  => source_b64,
-        "VC_TRACE_PRELUDE" => prelude,
-      },
+      env: env,
       output: stdout,
       error: stderr
     )
@@ -248,7 +255,7 @@ module VisualCompiler
     "lib"
   end
 
-  def compile_llvm_ir(source : String, prelude : String)
+  def compile_llvm_ir(source : String, prelude : String, no_debug : Bool = false)
     token = Random::Secure.hex(8)
     source_path = "/tmp/visual_compiler_#{token}.cr"
     binary_path = "/tmp/visual_compiler_#{token}.out"
@@ -259,9 +266,11 @@ module VisualCompiler
     stderr = IO::Memory.new
     begin
       File.write(source_path, source)
+      build_args = ["build", source_path, "--prelude", prelude, "--emit", "llvm-ir", "-o", binary_path]
+      build_args << "--no-debug" if no_debug
       status = Process.run(
         "crystal",
-        ["build", source_path, "--prelude", prelude, "--emit", "llvm-ir", "-o", binary_path],
+        build_args,
         output: stdout,
         error: stderr
       )
@@ -376,6 +385,12 @@ module VisualCompiler
     prelude = env.params.query["prelude"]?
     return DEFAULT_TRACE_PRELUDE if prelude.nil? || prelude.empty?
     prelude
+  end
+
+  def read_no_debug(env) : Bool
+    no_debug = env.params.query["no_debug"]?
+    return false if no_debug.nil? || no_debug.empty?
+    no_debug == "1" || no_debug == "true"
   end
 
   def error_response(ex : Exception, source : String, snapshots : Array(Snapshot), llvm_ir : String, program_metadata : Hash(String, JSON::Any)?, semantic_summary : Hash(String, JSON::Any)?, prelude : String)

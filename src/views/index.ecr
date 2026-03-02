@@ -278,6 +278,9 @@
             <option value="prelude">prelude</option>
             <option value="empty">empty</option>
           </select>
+          <label class="status" style="display:flex; align-items:center; gap:4px;">
+            <input type="checkbox" id="noDebugCheck">--no-debug
+          </label>
           <span class="status">canonical parse → semantic summary → codegen</span>
         </div>
         <div id="progress" class="progress" aria-live="polite">
@@ -333,6 +336,7 @@
     const layoutEl = document.getElementById("layout");
     const runBtn = document.getElementById("runBtn");
     const preludeSel = document.getElementById("preludeSel");
+    const noDebugCheck = document.getElementById("noDebugCheck");
     const statusEl = document.getElementById("status");
     const tabsEl = document.getElementById("tabs");
     const metaEl = document.getElementById("meta");
@@ -607,7 +611,8 @@
 
       try {
         const prelude = preludeSel.value || "nano";
-        const response2 = await fetch(`/api/trace?prelude=${encodeURIComponent(prelude)}`, {
+        const noDebug = noDebugCheck.checked;
+        const response2 = await fetch(`/api/trace?prelude=${encodeURIComponent(prelude)}&no_debug=${noDebug ? '1' : '0'}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ code: sourceEditor.getValue() }),
